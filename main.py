@@ -6,7 +6,6 @@ import logging
 
 app = FastAPI()
 
-# Setup basic logging
 logging.basicConfig(level=logging.INFO)
 
 @app.get("/get_mp4")
@@ -20,22 +19,29 @@ def get_mp4(clip_url: str):
         if resp.status_code != 200:
             raise HTTPException(status_code=404, detail=f"Clip not found (status {resp.status_code})")
 
-        logging.info(f"Page content length: {len(resp.text)}")
+        text = resp.text
 
-        match = re.search(r'"quality_options":(\[.*?\])', resp.text)
-        if not match:
-            raise HTTPException(status_code=500, detail="Could not parse clip info (pattern not found)")
+        # Attempt to extract JSON data inside window.__INITIAL_STATE__ or similar
+        json_data_match = re.search(r'window\.__INITIAL_STATE__\s?=\s?({.+?});</script>', text)
+        if not json_data_match:
+            raise HTTPException(status_code=500, detail="Could not find initial JSON state in clip page")
 
-        quality_options = json.loads(match.group(1))
-        logging.info(f"Found {len(quality_options)} quality options")
+        json_data = json.loads(json_data_match.group(1))
 
-        if not quality_options:
-            raise HTTPException(status_code=500, detail="No quality options found in clip info")
+        # Navigate the JSON data to find the clip video qualities
+        try:
+            clip = next(iter(json_data['clips'].values()))
+            qualities = clip['videoQualities']
+            if not qualities:
+                raise Exception("No video qualities found")
 
-        mp4_url = quality_options[0]['source']
-        logging.info(f"Returning mp4_url: {mp4_url}")
+            mp4_url = qualities[0]['source']  # usually highest quality first
+            logging.info(f"Found mp4_url: {mp4_url}")
 
-        return {"mp4_url": mp4_url}
+            return {"mp4_url": mp4_url}
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error extracting mp4 url: {str(e)}")
 
     except Exception as e:
         logging.error(f"Exception: {str(e)}")
