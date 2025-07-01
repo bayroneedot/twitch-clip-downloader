@@ -1,48 +1,46 @@
-from fastapi import FastAPI, HTTPException
-import requests
-import re
-import json
-import logging
+import os
+import asyncio
+import uuid
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from yt_dlp import YoutubeDL
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
-logging.basicConfig(level=logging.INFO)
+TEMP_DIR = "/tmp"
 
-@app.get("/get_mp4")
-def get_mp4(clip_url: str):
+def cleanup_file(path: str, delay_seconds: int = 300):
+    async def _cleanup():
+        await asyncio.sleep(delay_seconds)
+        if os.path.exists(path):
+            os.remove(path)
+    return _cleanup()
+
+@app.get("/download_clip")
+async def download_clip(clip_url: str, background_tasks: BackgroundTasks):
+    # Generate a unique filename per request
+    file_id = str(uuid.uuid4())
+    clip_path = os.path.join(TEMP_DIR, f"{file_id}.mp4")
+
+    ydl_opts = {
+        'format': 'mp4',
+        'outtmpl': clip_path,
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    # Download the clip (blocking, consider moving to threadpool if needed)
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        logging.info(f"Fetching clip page: {clip_url}")
-        resp = requests.get(clip_url, headers=headers)
-        logging.info(f"Response status: {resp.status_code}")
-
-        if resp.status_code != 200:
-            raise HTTPException(status_code=404, detail=f"Clip not found (status {resp.status_code})")
-
-        text = resp.text
-
-        # Attempt to extract JSON data inside window.__INITIAL_STATE__ or similar
-        json_data_match = re.search(r'window\.__INITIAL_STATE__\s?=\s?({.+?});</script>', text)
-        if not json_data_match:
-            raise HTTPException(status_code=500, detail="Could not find initial JSON state in clip page")
-
-        json_data = json.loads(json_data_match.group(1))
-
-        # Navigate the JSON data to find the clip video qualities
-        try:
-            clip = next(iter(json_data['clips'].values()))
-            qualities = clip['videoQualities']
-            if not qualities:
-                raise Exception("No video qualities found")
-
-            mp4_url = qualities[0]['source']  # usually highest quality first
-            logging.info(f"Found mp4_url: {mp4_url}")
-
-            return {"mp4_url": mp4_url}
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error extracting mp4 url: {str(e)}")
-
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([clip_url])
     except Exception as e:
-        logging.error(f"Exception: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        # Clean up partially downloaded file
+        if os.path.exists(clip_path):
+            os.remove(clip_path)
+        raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
+
+    # Schedule file deletion after 5 minutes (300 seconds)
+    background_tasks.add_task(cleanup_file(clip_path))
+
+    # Return the downloaded file (stream it)
+    return FileResponse(clip_path, media_type="video/mp4", filename=f"clip-{file_id}.mp4")
